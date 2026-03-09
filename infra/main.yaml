@@ -16,9 +16,6 @@ Parameters:
     Default: disaster-response
     Description: Project name for resource naming
 
-Conditions:
-  IsProd: !Equals [!Ref Environment, prod]
-
 Resources:
   # ── Nested Stacks ──
   NetworkingStack:

@@ -1,0 +1,142 @@
+# =============================================================================
+# GitHub Actions CD — AWS Disaster Response Platform (CloudFormation)
+# Deploys CloudFormation stacks across environments with approvals
+# =============================================================================
+
+name: CD — Deploy to AWS
+
+on:
+  workflow_run:
+    workflows: ["CI — Validate & Package CloudFormation"]
+    types: [completed]
+    branches: [master, main]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-east-1
+  STACK_NAME: disaster-response
+
+jobs:
+  # ────────────────────────────────────────────
+  # Job 1 — Deploy to DEV
+  # ────────────────────────────────────────────
+  deploy-dev:
+    name: 🚀 Deploy — DEV
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download CI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cfn-templates-${{ github.event.workflow_run.run_number }}
+          path: artifact/
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy Stack — DEV
+        run: |
+          aws cloudformation deploy \
+            --template-file artifact/packaged-main.yaml \
+            --stack-name ${{ env.STACK_NAME }}-dev \
+            --parameter-overrides file://artifact/parameters/dev.json \
+            --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+            --no-fail-on-empty-changeset \
+            --tags Environment=dev Project=disaster-response
+
+      - name: Smoke Test — DEV
+        run: |
+          echo "✅ DEV deployment complete"
+          aws cloudformation describe-stack-resources \
+            --stack-name ${{ env.STACK_NAME }}-dev \
+            --query "StackResources[].{Type:ResourceType,Status:ResourceStatus}" \
+            --output table
+
+  # ────────────────────────────────────────────
+  # Job 2 — Deploy to STAGING
+  # ────────────────────────────────────────────
+  deploy-staging:
+    name: 🚀 Deploy — STAGING
+    runs-on: ubuntu-latest
+    needs: deploy-dev
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download CI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cfn-templates-${{ github.event.workflow_run.run_number }}
+          path: artifact/
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy Stack — STAGING
+        run: |
+          aws cloudformation deploy \
+            --template-file artifact/packaged-main.yaml \
+            --stack-name ${{ env.STACK_NAME }}-staging \
+            --parameter-overrides file://artifact/parameters/staging.json \
+            --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+            --no-fail-on-empty-changeset \
+            --tags Environment=staging Project=disaster-response
+
+  # ────────────────────────────────────────────
+  # Job 3 — Deploy to PRODUCTION (manual approval)
+  # ────────────────────────────────────────────
+  deploy-prod:
+    name: 🟢 Deploy — PRODUCTION
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download CI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cfn-templates-${{ github.event.workflow_run.run_number }}
+          path: artifact/
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy Stack — PROD
+        run: |
+          aws cloudformation deploy \
+            --template-file artifact/packaged-main.yaml \
+            --stack-name ${{ env.STACK_NAME }}-prod \
+            --parameter-overrides file://artifact/parameters/prod.json \
+            --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+            --no-fail-on-empty-changeset \
+            --tags Environment=prod Project=disaster-response
+
+      - name: Post-deploy validation
+        run: |
+          echo "✅ PRODUCTION deployment complete"
+          aws cloudformation describe-stack-resources \
+            --stack-name ${{ env.STACK_NAME }}-prod \
+            --query "StackResources[].{Type:ResourceType,Status:ResourceStatus}" \
+            --output table
