@@ -1,0 +1,146 @@
+# =============================================================================
+# CI Pipeline — AWS Disaster Response Network (CloudFormation)
+# Validates CF templates, packages, uploads versioned artifact to Azure Storage
+# Built on TFS (Azure DevOps) — deploys to AWS
+# =============================================================================
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - infra/**
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  - name: azureServiceConnection
+    value: 'AzureServiceConnection'
+  - name: awsServiceConnection
+    value: 'AWSServiceConnection'
+  - name: artifactStorageAccount
+    value: 'stcfnartifacts'
+  - name: artifactContainer
+    value: 'cfn-artifacts'
+  - name: awsRegion
+    value: 'us-east-1'
+  - name: buildVersion
+    value: '$(Build.BuildNumber)'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+  # ──────────────────────────────────────────────
+  # Stage 1 — Validate CloudFormation Templates
+  # ──────────────────────────────────────────────
+  - stage: Validate
+    displayName: '🔍 Validate CloudFormation'
+    jobs:
+      - job: LintAndValidate
+        displayName: 'Lint & Validate CF Templates'
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          - script: |
+              pip install cfn-lint
+              echo "✅ cfn-lint installed"
+            displayName: 'Install cfn-lint'
+
+          - script: |
+              echo "========================================="
+              echo "  Linting all CloudFormation templates"
+              echo "========================================="
+              cfn-lint infra/**/*.yaml
+              echo "✅ All CF templates passed linting"
+            displayName: 'Lint CF Templates'
+
+          - task: AmazonWebServices.aws-vsts-tools.AWSShellScript.AWSShellScript@1
+            displayName: 'Validate CF Template — AWS'
+            inputs:
+              awsCredentials: $(awsServiceConnection)
+              regionName: $(awsRegion)
+              scriptType: inline
+              inlineScript: |
+                aws cloudformation validate-template \
+                  --template-body file://infra/main.yaml
+                echo "✅ CloudFormation template validated"
+
+  # ──────────────────────────────────────────────
+  # Stage 2 — Package & Upload Artifact
+  # ──────────────────────────────────────────────
+  - stage: Build
+    displayName: '📦 Package & Upload Artifact'
+    dependsOn: Validate
+    jobs:
+      - job: PackageArtifact
+        displayName: 'Package CF & Upload to Azure Storage'
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          - task: AmazonWebServices.aws-vsts-tools.AWSShellScript.AWSShellScript@1
+            displayName: 'Package CF Template (resolve nested)'
+            inputs:
+              awsCredentials: $(awsServiceConnection)
+              regionName: $(awsRegion)
+              inlineScript: |
+                # Package nested stacks — uploads to S3 and rewrites template URLs
+                aws cloudformation package \
+                  --template-file infra/main.yaml \
+                  --s3-bucket disaster-response-cf-templates-$(awsRegion) \
+                  --s3-prefix "$(buildVersion)" \
+                  --output-template-file $(Build.ArtifactStagingDirectory)/packaged-main.yaml
+
+                echo "✅ CF template packaged"
+
+          - script: |
+              mkdir -p $(Build.ArtifactStagingDirectory)/parameters
+              cp infra/parameters/*.json $(Build.ArtifactStagingDirectory)/parameters/
+              cp -r infra/modules $(Build.ArtifactStagingDirectory)/modules/
+
+              cat > $(Build.ArtifactStagingDirectory)/manifest.json << EOF
+              {
+                "project": "aws-disaster-response-network",
+                "iac": "cloudformation",
+                "targetCloud": "aws",
+                "version": "$(buildVersion)",
+                "buildId": "$(Build.BuildId)",
+                "sourceCommit": "$(Build.SourceVersion)",
+                "buildDate": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+                "awsRegion": "$(awsRegion)"
+              }
+              EOF
+              echo "✅ Artifact packaged"
+            displayName: 'Package Artifact'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Pipeline Artifact'
+            inputs:
+              targetPath: $(Build.ArtifactStagingDirectory)
+              artifactName: 'cfn-infra-$(buildVersion)'
+
+          # Upload to Azure Storage Account (versioned)
+          - task: AzureCLI@2
+            displayName: 'Upload Versioned Artifact to Azure Storage'
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                ARTIFACT_PATH="artifacts/disaster-response/$(buildVersion)"
+
+                az storage blob upload-batch \
+                  --account-name $(artifactStorageAccount) \
+                  --destination $(artifactContainer) \
+                  --destination-path "$ARTIFACT_PATH" \
+                  --source $(Build.ArtifactStagingDirectory) \
+                  --auth-mode login \
+                  --overwrite
+
+                echo "✅ Artifact uploaded to Azure Storage: $(artifactContainer)/$ARTIFACT_PATH"

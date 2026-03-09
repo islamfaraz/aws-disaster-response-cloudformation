@@ -1,0 +1,101 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  AWS Real-Time Disaster Response Network — Main Stack
+  Deploys a fully serverless disaster response platform for emergency management,
+  crowd-sourced incident reporting, and real-time resource coordination.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment
+
+  ProjectName:
+    Type: String
+    Default: disaster-response
+    Description: Project name for resource naming
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+  IsNotDev: !Not [!Equals [!Ref Environment, dev]]
+
+Resources:
+  # ── Nested Stacks ──
+  NetworkingStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./modules/networking.yaml
+      Parameters:
+        Environment: !Ref Environment
+        ProjectName: !Ref ProjectName
+
+  DatabaseStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./modules/dynamodb.yaml
+      Parameters:
+        Environment: !Ref Environment
+        ProjectName: !Ref ProjectName
+
+  MessagingStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./modules/messaging.yaml
+      Parameters:
+        Environment: !Ref Environment
+        ProjectName: !Ref ProjectName
+
+  ComputeStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - DatabaseStack
+      - MessagingStack
+    Properties:
+      TemplateURL: ./modules/lambda.yaml
+      Parameters:
+        Environment: !Ref Environment
+        ProjectName: !Ref ProjectName
+        IncidentsTableArn: !GetAtt DatabaseStack.Outputs.IncidentsTableArn
+        ResourcesTableArn: !GetAtt DatabaseStack.Outputs.ResourcesTableArn
+        AlertsTopicArn: !GetAtt MessagingStack.Outputs.AlertsTopicArn
+        IncidentQueueArn: !GetAtt MessagingStack.Outputs.IncidentQueueArn
+        IncidentQueueUrl: !GetAtt MessagingStack.Outputs.IncidentQueueUrl
+
+  ApiStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - ComputeStack
+    Properties:
+      TemplateURL: ./modules/apigateway.yaml
+      Parameters:
+        Environment: !Ref Environment
+        ProjectName: !Ref ProjectName
+        ReportIncidentFunctionArn: !GetAtt ComputeStack.Outputs.ReportIncidentFunctionArn
+        GetIncidentsFunctionArn: !GetAtt ComputeStack.Outputs.GetIncidentsFunctionArn
+        AllocateResourceFunctionArn: !GetAtt ComputeStack.Outputs.AllocateResourceFunctionArn
+
+  StorageStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./modules/s3.yaml
+      Parameters:
+        Environment: !Ref Environment
+        ProjectName: !Ref ProjectName
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !GetAtt ApiStack.Outputs.ApiEndpoint
+
+  IncidentsTableName:
+    Description: DynamoDB Incidents table name
+    Value: !GetAtt DatabaseStack.Outputs.IncidentsTableName
+
+  AlertsTopicArn:
+    Description: SNS Alerts topic ARN
+    Value: !GetAtt MessagingStack.Outputs.AlertsTopicArn
+
+  MediaBucketName:
+    Description: S3 bucket for incident media
+    Value: !GetAtt StorageStack.Outputs.MediaBucketName

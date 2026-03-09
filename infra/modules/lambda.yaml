@@ -1,0 +1,269 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Lambda Functions — Core compute for disaster response processing
+
+Parameters:
+  Environment:
+    Type: String
+  ProjectName:
+    Type: String
+  IncidentsTableArn:
+    Type: String
+  ResourcesTableArn:
+    Type: String
+  AlertsTopicArn:
+    Type: String
+  IncidentQueueArn:
+    Type: String
+  IncidentQueueUrl:
+    Type: String
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+
+Resources:
+  # ── IAM Role for Lambda Functions ──
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Ref IncidentsTableArn
+                  - !Sub '${IncidentsTableArn}/index/*'
+                  - !Ref ResourcesTableArn
+                  - !Sub '${ResourcesTableArn}/index/*'
+        - PolicyName: SNSPublish
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref AlertsTopicArn
+        - PolicyName: SQSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !Ref IncidentQueueArn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── Lambda: Report Incident ──
+  ReportIncidentFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-report-incident'
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: !If [IsProd, 512, 256]
+      Timeout: 30
+      Environment:
+        Variables:
+          INCIDENTS_TABLE: !Sub '${ProjectName}-${Environment}-incidents'
+          ALERTS_TOPIC_ARN: !Ref AlertsTopicArn
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import uuid
+          from datetime import datetime
+          
+          dynamodb = boto3.resource('dynamodb')
+          sns = boto3.client('sns')
+          import os
+          
+          def handler(event, context):
+              table = dynamodb.Table(os.environ['INCIDENTS_TABLE'])
+              body = json.loads(event.get('body', '{}'))
+              
+              incident = {
+                  'incidentId': str(uuid.uuid4()),
+                  'type': body.get('type', 'unknown'),
+                  'severity': body.get('severity', 'medium'),
+                  'description': body.get('description', ''),
+                  'latitude': str(body.get('latitude', 0)),
+                  'longitude': str(body.get('longitude', 0)),
+                  'region': body.get('region', 'unknown'),
+                  'reportedBy': body.get('reportedBy', 'anonymous'),
+                  'reportedAt': datetime.utcnow().isoformat(),
+                  'status': 'reported'
+              }
+              
+              table.put_item(Item=incident)
+              
+              if body.get('severity') in ['critical', 'high']:
+                  sns.publish(
+                      TopicArn=os.environ['ALERTS_TOPIC_ARN'],
+                      Subject=f"🚨 {body.get('severity').upper()} Incident: {body.get('type')}",
+                      Message=json.dumps(incident)
+                  )
+              
+              return {
+                  'statusCode': 201,
+                  'headers': {'Content-Type': 'application/json'},
+                  'body': json.dumps({'incidentId': incident['incidentId'], 'status': 'reported'})
+              }
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── Lambda: Get Incidents ──
+  GetIncidentsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-get-incidents'
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: !If [IsProd, 512, 256]
+      Timeout: 30
+      Environment:
+        Variables:
+          INCIDENTS_TABLE: !Sub '${ProjectName}-${Environment}-incidents'
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from boto3.dynamodb.conditions import Key
+          
+          dynamodb = boto3.resource('dynamodb')
+          
+          def handler(event, context):
+              table = dynamodb.Table(os.environ['INCIDENTS_TABLE'])
+              
+              params = event.get('queryStringParameters') or {}
+              severity = params.get('severity')
+              region = params.get('region')
+              
+              if severity:
+                  response = table.query(
+                      IndexName='severity-time-index',
+                      KeyConditionExpression=Key('severity').eq(severity),
+                      ScanIndexForward=False,
+                      Limit=50
+                  )
+              elif region:
+                  response = table.query(
+                      IndexName='region-time-index',
+                      KeyConditionExpression=Key('region').eq(region),
+                      ScanIndexForward=False,
+                      Limit=50
+                  )
+              else:
+                  response = table.scan(Limit=50)
+              
+              return {
+                  'statusCode': 200,
+                  'headers': {'Content-Type': 'application/json'},
+                  'body': json.dumps({'incidents': response.get('Items', [])})
+              }
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── Lambda: Allocate Resource ──
+  AllocateResourceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-allocate-resource'
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: !If [IsProd, 512, 256]
+      Timeout: 30
+      Environment:
+        Variables:
+          RESOURCES_TABLE: !Sub '${ProjectName}-${Environment}-resources'
+          INCIDENTS_TABLE: !Sub '${ProjectName}-${Environment}-incidents'
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          
+          dynamodb = boto3.resource('dynamodb')
+          
+          def handler(event, context):
+              resources_table = dynamodb.Table(os.environ['RESOURCES_TABLE'])
+              incidents_table = dynamodb.Table(os.environ['INCIDENTS_TABLE'])
+              body = json.loads(event.get('body', '{}'))
+              
+              resource_id = body.get('resourceId')
+              incident_id = body.get('incidentId')
+              
+              resources_table.update_item(
+                  Key={'resourceId': resource_id},
+                  UpdateExpression='SET #s = :status, assignedTo = :incident, assignedAt = :time',
+                  ExpressionAttributeNames={'#s': 'status'},
+                  ExpressionAttributeValues={
+                      ':status': 'allocated',
+                      ':incident': incident_id,
+                      ':time': datetime.utcnow().isoformat()
+                  }
+              )
+              
+              incidents_table.update_item(
+                  Key={'incidentId': incident_id},
+                  UpdateExpression='SET #s = :status',
+                  ExpressionAttributeNames={'#s': 'status'},
+                  ExpressionAttributeValues={':status': 'responding'}
+              )
+              
+              return {
+                  'statusCode': 200,
+                  'headers': {'Content-Type': 'application/json'},
+                  'body': json.dumps({'message': 'Resource allocated', 'resourceId': resource_id})
+              }
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── SQS Event Source Mapping (async processing) ──
+  IncidentQueueEventSource:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !Ref IncidentQueueArn
+      FunctionName: !Ref ReportIncidentFunction
+      BatchSize: 10
+      Enabled: true
+
+Outputs:
+  ReportIncidentFunctionArn:
+    Value: !GetAtt ReportIncidentFunction.Arn
+  GetIncidentsFunctionArn:
+    Value: !GetAtt GetIncidentsFunction.Arn
+  AllocateResourceFunctionArn:
+    Value: !GetAtt AllocateResourceFunction.Arn
+  LambdaRoleArn:
+    Value: !GetAtt LambdaExecutionRole.Arn

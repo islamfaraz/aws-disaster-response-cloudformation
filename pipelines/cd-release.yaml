@@ -1,0 +1,198 @@
+# =============================================================================
+# CD Release Pipeline — AWS Disaster Response Network (CloudFormation)
+# Downloads artifact from Azure Storage and deploys to AWS
+# =============================================================================
+
+trigger: none
+
+resources:
+  pipelines:
+    - pipeline: ciBuild
+      source: 'disaster-response-ci'
+      trigger:
+        branches:
+          include:
+            - main
+
+variables:
+  - name: azureServiceConnection
+    value: 'AzureServiceConnection'
+  - name: awsServiceConnection
+    value: 'AWSServiceConnection'
+  - name: artifactStorageAccount
+    value: 'stcfnartifacts'
+  - name: artifactContainer
+    value: 'cfn-artifacts'
+  - name: awsRegion
+    value: 'us-east-1'
+  - name: stackName
+    value: 'disaster-response'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+  # ──────────────────────────────────────────────
+  # Stage 1 — Deploy to DEV (AWS)
+  # ──────────────────────────────────────────────
+  - stage: DeployDev
+    displayName: '🚀 Deploy to DEV (AWS)'
+    jobs:
+      - deployment: DeployCF
+        displayName: 'CloudFormation Deploy — DEV'
+        environment: 'disaster-response-dev'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureCLI@2
+                  displayName: 'Download Artifact from Azure Storage'
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      BUILD_VERSION=$(resources.pipeline.ciBuild.runName)
+                      ARTIFACT_PATH="artifacts/disaster-response/$BUILD_VERSION"
+
+                      mkdir -p $(Agent.TempDirectory)/cf-artifact
+                      az storage blob download-batch \
+                        --account-name $(artifactStorageAccount) \
+                        --source $(artifactContainer) \
+                        --destination $(Agent.TempDirectory)/cf-artifact \
+                        --pattern "$ARTIFACT_PATH/*" \
+                        --auth-mode login
+
+                      echo "✅ Artifact downloaded"
+
+                - task: AmazonWebServices.aws-vsts-tools.AWSShellScript.AWSShellScript@1
+                  displayName: 'Deploy Stack — DEV'
+                  inputs:
+                    awsCredentials: $(awsServiceConnection)
+                    regionName: $(awsRegion)
+                    scriptType: inline
+                    inlineScript: |
+                      BUILD_VERSION=$(resources.pipeline.ciBuild.runName)
+                      TEMPLATE="$(Agent.TempDirectory)/cf-artifact/artifacts/disaster-response/$BUILD_VERSION/packaged-main.yaml"
+                      PARAMS="$(Agent.TempDirectory)/cf-artifact/artifacts/disaster-response/$BUILD_VERSION/parameters/dev.json"
+
+                      echo "🚀 Deploying to DEV..."
+                      aws cloudformation deploy \
+                        --template-file "$TEMPLATE" \
+                        --stack-name "$(stackName)-dev" \
+                        --parameter-overrides file://"$PARAMS" \
+                        --capabilities CAPABILITY_NAMED_IAM \
+                        --no-fail-on-empty-changeset \
+                        --tags Environment=dev Project=DisasterResponse
+
+                      echo "✅ DEV deployment complete"
+                      aws cloudformation describe-stacks \
+                        --stack-name "$(stackName)-dev" \
+                        --query "Stacks[0].Outputs" \
+                        --output table
+
+  # ──────────────────────────────────────────────
+  # Stage 2 — Deploy to STAGING (AWS)
+  # ──────────────────────────────────────────────
+  - stage: DeployStaging
+    displayName: '🟡 Deploy to STAGING (AWS)'
+    dependsOn: DeployDev
+    jobs:
+      - deployment: DeployCF
+        displayName: 'CloudFormation Deploy — STAGING'
+        environment: 'disaster-response-staging'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureCLI@2
+                  displayName: 'Download Artifact'
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      BUILD_VERSION=$(resources.pipeline.ciBuild.runName)
+                      mkdir -p $(Agent.TempDirectory)/cf-artifact
+                      az storage blob download-batch \
+                        --account-name $(artifactStorageAccount) \
+                        --source $(artifactContainer) \
+                        --destination $(Agent.TempDirectory)/cf-artifact \
+                        --pattern "artifacts/disaster-response/$BUILD_VERSION/*" \
+                        --auth-mode login
+
+                - task: AmazonWebServices.aws-vsts-tools.AWSShellScript.AWSShellScript@1
+                  displayName: 'Deploy Stack — STAGING'
+                  inputs:
+                    awsCredentials: $(awsServiceConnection)
+                    regionName: $(awsRegion)
+                    scriptType: inline
+                    inlineScript: |
+                      BUILD_VERSION=$(resources.pipeline.ciBuild.runName)
+                      TEMPLATE="$(Agent.TempDirectory)/cf-artifact/artifacts/disaster-response/$BUILD_VERSION/packaged-main.yaml"
+
+                      aws cloudformation deploy \
+                        --template-file "$TEMPLATE" \
+                        --stack-name "$(stackName)-staging" \
+                        --parameter-overrides Environment=staging ProjectName=disaster-response \
+                        --capabilities CAPABILITY_NAMED_IAM \
+                        --no-fail-on-empty-changeset
+
+                      echo "✅ STAGING deployment complete"
+
+  # ──────────────────────────────────────────────
+  # Stage 3 — Deploy to PRODUCTION (Manual Approval)
+  # ──────────────────────────────────────────────
+  - stage: DeployProd
+    displayName: '🟢 Deploy to PRODUCTION (AWS)'
+    dependsOn: DeployStaging
+    jobs:
+      - deployment: DeployCF
+        displayName: 'CloudFormation Deploy — PROD'
+        environment: 'disaster-response-prod'   # Manual approval gate
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureCLI@2
+                  displayName: 'Download Artifact'
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      BUILD_VERSION=$(resources.pipeline.ciBuild.runName)
+                      mkdir -p $(Agent.TempDirectory)/cf-artifact
+                      az storage blob download-batch \
+                        --account-name $(artifactStorageAccount) \
+                        --source $(artifactContainer) \
+                        --destination $(Agent.TempDirectory)/cf-artifact \
+                        --pattern "artifacts/disaster-response/$BUILD_VERSION/*" \
+                        --auth-mode login
+
+                - task: AmazonWebServices.aws-vsts-tools.AWSShellScript.AWSShellScript@1
+                  displayName: 'Create Change Set — PROD'
+                  inputs:
+                    awsCredentials: $(awsServiceConnection)
+                    regionName: $(awsRegion)
+                    scriptType: inline
+                    inlineScript: |
+                      BUILD_VERSION=$(resources.pipeline.ciBuild.runName)
+                      TEMPLATE="$(Agent.TempDirectory)/cf-artifact/artifacts/disaster-response/$BUILD_VERSION/packaged-main.yaml"
+
+                      # Create and review change set before applying
+                      aws cloudformation deploy \
+                        --template-file "$TEMPLATE" \
+                        --stack-name "$(stackName)-prod" \
+                        --parameter-overrides Environment=prod ProjectName=disaster-response \
+                        --capabilities CAPABILITY_NAMED_IAM \
+                        --no-fail-on-empty-changeset \
+                        --tags Environment=prod Project=DisasterResponse
+
+                      echo "✅ PRODUCTION deployment complete"
+
+                      # Show outputs
+                      aws cloudformation describe-stacks \
+                        --stack-name "$(stackName)-prod" \
+                        --query "Stacks[0].Outputs" \
+                        --output table

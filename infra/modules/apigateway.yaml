@@ -1,0 +1,143 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  API Gateway — REST API for incident reporting and resource management
+
+Parameters:
+  Environment:
+    Type: String
+  ProjectName:
+    Type: String
+  ReportIncidentFunctionArn:
+    Type: String
+  GetIncidentsFunctionArn:
+    Type: String
+  AllocateResourceFunctionArn:
+    Type: String
+
+Resources:
+  # ── REST API ──
+  DisasterResponseApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-api'
+      Description: Disaster Response Network API
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  # ── /incidents Resource ──
+  IncidentsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DisasterResponseApi
+      ParentId: !GetAtt DisasterResponseApi.RootResourceId
+      PathPart: incidents
+
+  # ── POST /incidents — Report a new incident ──
+  PostIncidentMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DisasterResponseApi
+      ResourceId: !Ref IncidentsResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ReportIncidentFunctionArn}/invocations'
+
+  # ── GET /incidents — Query incidents ──
+  GetIncidentsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DisasterResponseApi
+      ResourceId: !Ref IncidentsResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${GetIncidentsFunctionArn}/invocations'
+
+  # ── /resources Resource ──
+  ResourcesResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DisasterResponseApi
+      ParentId: !GetAtt DisasterResponseApi.RootResourceId
+      PathPart: resources
+
+  # ── /resources/allocate ──
+  AllocateResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DisasterResponseApi
+      ParentId: !Ref ResourcesResource
+      PathPart: allocate
+
+  # ── POST /resources/allocate ──
+  PostAllocateMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DisasterResponseApi
+      ResourceId: !Ref AllocateResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AllocateResourceFunctionArn}/invocations'
+
+  # ── Lambda Permissions ──
+  ReportIncidentPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ReportIncidentFunctionArn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${DisasterResponseApi}/*'
+
+  GetIncidentsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref GetIncidentsFunctionArn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${DisasterResponseApi}/*'
+
+  AllocateResourcePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AllocateResourceFunctionArn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${DisasterResponseApi}/*'
+
+  # ── Deployment ──
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - PostIncidentMethod
+      - GetIncidentsMethod
+      - PostAllocateMethod
+    Properties:
+      RestApiId: !Ref DisasterResponseApi
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref DisasterResponseApi
+      DeploymentId: !Ref ApiDeployment
+      StageName: !Ref Environment
+      TracingEnabled: true  # X-Ray tracing
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          ThrottlingBurstLimit: 100
+          ThrottlingRateLimit: 50
+
+Outputs:
+  ApiEndpoint:
+    Value: !Sub 'https://${DisasterResponseApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+  ApiId:
+    Value: !Ref DisasterResponseApi

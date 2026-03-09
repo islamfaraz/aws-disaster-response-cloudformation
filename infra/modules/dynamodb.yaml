@@ -1,0 +1,162 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  DynamoDB — Incident tracking, resource inventory, volunteer registry
+
+Parameters:
+  Environment:
+    Type: String
+  ProjectName:
+    Type: String
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+
+Resources:
+  # ── Incidents Table ──
+  IncidentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-${Environment}-incidents'
+      BillingMode: !If [IsProd, PROVISIONED, PAY_PER_REQUEST]
+      ProvisionedThroughput:
+        !If
+          - IsProd
+          - ReadCapacityUnits: 50
+            WriteCapacityUnits: 25
+          - !Ref AWS::NoValue
+      AttributeDefinitions:
+        - AttributeName: incidentId
+          AttributeType: S
+        - AttributeName: severity
+          AttributeType: S
+        - AttributeName: reportedAt
+          AttributeType: S
+        - AttributeName: region
+          AttributeType: S
+      KeySchema:
+        - AttributeName: incidentId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: severity-time-index
+          KeySchema:
+            - AttributeName: severity
+              KeyType: HASH
+            - AttributeName: reportedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            !If
+              - IsProd
+              - ReadCapacityUnits: 25
+                WriteCapacityUnits: 10
+              - !Ref AWS::NoValue
+        - IndexName: region-time-index
+          KeySchema:
+            - AttributeName: region
+              KeyType: HASH
+            - AttributeName: reportedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            !If
+              - IsProd
+              - ReadCapacityUnits: 25
+                WriteCapacityUnits: 10
+              - !Ref AWS::NoValue
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProd, true, false]
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── Resources Table (vehicles, shelters, medical supplies) ──
+  ResourcesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-${Environment}-resources'
+      BillingMode: !If [IsProd, PROVISIONED, PAY_PER_REQUEST]
+      ProvisionedThroughput:
+        !If
+          - IsProd
+          - ReadCapacityUnits: 25
+            WriteCapacityUnits: 15
+          - !Ref AWS::NoValue
+      AttributeDefinitions:
+        - AttributeName: resourceId
+          AttributeType: S
+        - AttributeName: resourceType
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: resourceId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: type-status-index
+          KeySchema:
+            - AttributeName: resourceType
+              KeyType: HASH
+            - AttributeName: status
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            !If
+              - IsProd
+              - ReadCapacityUnits: 15
+                WriteCapacityUnits: 10
+              - !Ref AWS::NoValue
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── Volunteers Table ──
+  VolunteersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-${Environment}-volunteers'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: volunteerId
+          AttributeType: S
+        - AttributeName: region
+          AttributeType: S
+        - AttributeName: skill
+          AttributeType: S
+      KeySchema:
+        - AttributeName: volunteerId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: region-skill-index
+          KeySchema:
+            - AttributeName: region
+              KeyType: HASH
+            - AttributeName: skill
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  IncidentsTableName:
+    Value: !Ref IncidentsTable
+  IncidentsTableArn:
+    Value: !GetAtt IncidentsTable.Arn
+  ResourcesTableName:
+    Value: !Ref ResourcesTable
+  ResourcesTableArn:
+    Value: !GetAtt ResourcesTable.Arn
+  VolunteersTableName:
+    Value: !Ref VolunteersTable
+  VolunteersTableArn:
+    Value: !GetAtt VolunteersTable.Arn

@@ -1,0 +1,101 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Messaging — SNS topics for alerts, SQS queues for async processing
+
+Parameters:
+  Environment:
+    Type: String
+  ProjectName:
+    Type: String
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+
+Resources:
+  # ── SNS Topic — Disaster Alerts (email/SMS/push) ──
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-${Environment}-alerts'
+      DisplayName: Disaster Response Alerts
+      KmsMasterKeyId: alias/aws/sns
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── SNS Topic — Resource Coordination ──
+  ResourceCoordinationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-${Environment}-resource-coordination'
+      DisplayName: Resource Coordination Updates
+      KmsMasterKeyId: alias/aws/sns
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── SQS Queue — Incident Processing (async) ──
+  IncidentQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ProjectName}-${Environment}-incident-processing'
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 86400  # 1 day
+      ReceiveMessageWaitTimeSeconds: 20  # Long polling
+      KmsMasterKeyId: alias/aws/sqs
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt IncidentDeadLetterQueue.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── Dead Letter Queue ──
+  IncidentDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ProjectName}-${Environment}-incident-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days
+      KmsMasterKeyId: alias/aws/sqs
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── SNS → SQS Subscription ──
+  AlertsToQueueSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertsTopic
+      Protocol: sqs
+      Endpoint: !GetAtt IncidentQueue.Arn
+      RawMessageDelivery: true
+
+  # ── SQS Policy — Allow SNS to send messages ──
+  IncidentQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref IncidentQueue
+      PolicyDocument:
+        Statement:
+          - Sid: AllowSNSToSendMessage
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt IncidentQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref AlertsTopic
+
+Outputs:
+  AlertsTopicArn:
+    Value: !Ref AlertsTopic
+  ResourceCoordinationTopicArn:
+    Value: !Ref ResourceCoordinationTopic
+  IncidentQueueArn:
+    Value: !GetAtt IncidentQueue.Arn
+  IncidentQueueUrl:
+    Value: !Ref IncidentQueue
+  DeadLetterQueueArn:
+    Value: !GetAtt IncidentDeadLetterQueue.Arn
