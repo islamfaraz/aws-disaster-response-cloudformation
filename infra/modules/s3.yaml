@@ -42,7 +42,7 @@ Resources:
         CorsRules:
           - AllowedHeaders: ['*']
             AllowedMethods: [GET, PUT, POST]
-            AllowedOrigins: ['*']
+            AllowedOrigins: ['https://app.disasterresponse.org']
             MaxAge: 3600
       Tags:
         - Key: Environment

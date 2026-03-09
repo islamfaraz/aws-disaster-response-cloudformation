@@ -40,7 +40,7 @@ Resources:
       RestApiId: !Ref DisasterResponseApi
       ResourceId: !Ref IncidentsResource
       HttpMethod: POST
-      AuthorizationType: NONE
+      AuthorizationType: AWS_IAM
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
@@ -53,7 +53,7 @@ Resources:
       RestApiId: !Ref DisasterResponseApi
       ResourceId: !Ref IncidentsResource
       HttpMethod: GET
-      AuthorizationType: NONE
+      AuthorizationType: AWS_IAM
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
@@ -82,7 +82,7 @@ Resources:
       RestApiId: !Ref DisasterResponseApi
       ResourceId: !Ref AllocateResource
       HttpMethod: POST
-      AuthorizationType: NONE
+      AuthorizationType: AWS_IAM
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST

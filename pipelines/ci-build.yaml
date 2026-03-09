@@ -72,11 +72,36 @@ stages:
                 echo "✅ CloudFormation template validated"
 
   # ──────────────────────────────────────────────
-  # Stage 2 — Package & Upload Artifact
+  # Stage 2 — Security Scanning (DevSecOps)
+  # ──────────────────────────────────────────────
+  - stage: SecurityScan
+    displayName: '🛡️ Security Scanning'
+    dependsOn: Validate
+    jobs:
+      - job: CFSecurityScan
+        displayName: 'CloudFormation Security Analysis'
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          - script: |
+              pip install checkov
+              checkov --directory infra --framework cloudformation --output cli --soft-fail
+              echo "✅ Checkov CloudFormation security scan complete"
+            displayName: 'Run Checkov — IaC Security Scan'
+
+          - script: |
+              pip install cfn-nag
+              cfn_nag_scan --input-path infra/ || true
+              echo "✅ cfn-nag scan complete"
+            displayName: 'Run cfn-nag — CloudFormation Best Practices'
+
+  # ──────────────────────────────────────────────
+  # Stage 3 — Package & Upload Artifact
   # ──────────────────────────────────────────────
   - stage: Build
     displayName: '📦 Package & Upload Artifact'
-    dependsOn: Validate
+    dependsOn: SecurityScan
     jobs:
       - job: PackageArtifact
         displayName: 'Package CF & Upload to Azure Storage'

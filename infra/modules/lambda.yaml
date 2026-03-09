@@ -15,8 +15,6 @@ Parameters:
     Type: String
   IncidentQueueArn:
     Type: String
-  IncidentQueueUrl:
-    Type: String
 
 Conditions:
   IsProd: !Equals [!Ref Environment, prod]
@@ -47,7 +45,6 @@ Resources:
                   - dynamodb:PutItem
                   - dynamodb:UpdateItem
                   - dynamodb:Query
-                  - dynamodb:Scan
                 Resource:
                   - !Ref IncidentsTableArn
                   - !Sub '${IncidentsTableArn}/index/*'
